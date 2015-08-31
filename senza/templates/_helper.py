@@ -5,6 +5,7 @@ import boto3
 import click
 import json
 import re
+import time
 from clickclick import Action
 from senza.aws import get_security_group
 
@@ -60,7 +61,18 @@ def check_security_group(sg_name, rules, region, allow_from_self=False):
             vpcs = vpc_conn.get_all_vpcs()
             ec2_conn = boto.ec2.connect_to_region(region)
             sg = ec2_conn.create_security_group(sg_name, 'Application security group', vpc_id=vpcs[0].id)
-            sg.add_tags({'Name': sg_name})
+            retry = 1
+            while retry:
+                try:
+                    sg.add_tags({'Name': sg_name})
+                except boto.exception.EC2ResponseError as e:
+                    if e.status == 400 and e.code == 'InvalidGroup.NotFound':
+                        time.sleep(retry)
+                        retry += 1
+                except:
+                    raise
+                else:
+                    retry = 0
             for proto, port in rules:
                 sg.authorize(ip_protocol=proto, from_port=port, to_port=port, cidr_ip='0.0.0.0/0')
             if allow_from_self:
