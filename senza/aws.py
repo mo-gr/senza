@@ -104,7 +104,7 @@ def resolve_topic_arn(region, topic):
 class SenzaStackSummary:
     def __init__(self, stack):
         self.stack = stack
-        parts = stack.stack_name.rsplit('-', 1)
+        parts = stack['StackName'].rsplit('-', 1)
         self.name = parts[0]
         if len(parts) > 1:
             self.version = parts[1]
@@ -114,7 +114,7 @@ class SenzaStackSummary:
     def __getattr__(self, item):
         if item in self.__dict__:
             return self.__dict__[item]
-        return getattr(self.stack, item)
+        return self.stack.get(item)
 
     def __lt__(self, other):
         def key(v):
@@ -122,18 +122,35 @@ class SenzaStackSummary:
         return key(self) < key(other)
 
     def __eq__(self, other):
-        return self.stack_name == other.stack_name
+        return self.stack['StackName'] == other.stack['StackName']
 
 
 def get_stacks(stack_refs: list, region, all=False):
-    cf = boto.cloudformation.connect_to_region(region)
+    cf = boto3.client('cloudformation', region)
     if all:
         status_filter = None
     else:
-        status_filter = [st for st in cf.valid_states if st != 'DELETE_COMPLETE']
-    stacks = cf.list_stacks(stack_status_filters=status_filter)
-    for stack in stacks:
-        if not stack_refs or matches_any(stack.stack_name, stack_refs):
+        # status_filter = [st for st in cf.valid_states if st != 'DELETE_COMPLETE']
+        status_filter = [
+            "CREATE_IN_PROGRESS",
+            "CREATE_FAILED",
+            "CREATE_COMPLETE",
+            "ROLLBACK_IN_PROGRESS",
+            "ROLLBACK_FAILED",
+            "ROLLBACK_COMPLETE",
+            "DELETE_IN_PROGRESS",
+            "DELETE_FAILED",
+            # "DELETE_COMPLETE",
+            "UPDATE_IN_PROGRESS",
+            "UPDATE_COMPLETE_CLEANUP_IN_PROGRESS",
+            "UPDATE_COMPLETE",
+            "UPDATE_ROLLBACK_IN_PROGRESS",
+            "UPDATE_ROLLBACK_FAILED",
+            "UPDATE_ROLLBACK_COMPLETE_CLEANUP_IN_PROGRESS",
+            "UPDATE_ROLLBACK_COMPLETE"
+            ]
+    for stack in cf.list_stacks(StackStatusFilter=status_filter)['StackSummaries']:
+        if not stack_refs or matches_any(stack['StackName'], stack_refs):
             yield SenzaStackSummary(stack)
 
 
@@ -160,6 +177,27 @@ def matches_any(cf_stack_name: str, stack_refs: list):
         elif not ref.version and (cf_stack_name or '').rsplit('-', 1)[0] == ref.name:
             return True
     return False
+
+
+def get_tag(tags: list, key: str):
+    '''
+    >>> get_tag([{'Key': 'aws:cloudformation:stack-id', 'Value': 'arn:aws:cloudformation:eu-west-1:123:stack/test-123'},
+    ... {'Key': 'Name', 'Value': 'test-123'},
+    ... {'Key': 'StackVersion', 'Value': 123'}], 'StackVersion')
+    '123'
+    >>> get_tag([{'Key': 'aws:cloudformation:stack-id', 'Value': 'arn:aws:cloudformation:eu-west-1:123:stack/test-123'},
+    ... {'Key': 'Name', 'Value': 'test-123'},
+    ... {'Key': 'StackVersion', 'Value': 123'}], 'aws:cloudformation:stack-id')
+    'arn:aws:cloudformation:eu-west-1:123:stack/test-123'
+    >>> get_tag([{'Key': 'aws:cloudformation:stack-id', 'Value': 'arn:aws:cloudformation:eu-west-1:123:stack/test-123'},
+    ... {'Key': 'Name', 'Value': 'test-123'},
+    ... {'Key': 'StackVersion', 'Value': 123'}], 'notfound')
+    '''
+    found = [tag['Value'] for tag in tags if tag['Key'] == key]
+    if len(found):
+        return found[0]
+    else:
+        return None
 
 
 def get_account_id():

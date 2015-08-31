@@ -14,24 +14,17 @@ from urllib.error import URLError
 import dns.resolver
 import time
 
-from boto.exception import BotoServerError
 import click
 from clickclick import AliasedGroup, Action, choice, info, FloatRange, OutputFormat, fatal_error
 from clickclick.console import print_table
 import requests
 import yaml
 import base64
-import boto.cloudformation
-import boto.vpc
-import boto.ec2
-import boto.ec2.autoscale
-import boto.iam
-import boto.sns
-import boto.route53
 import boto3
+import botocore
 
 from .aws import parse_time, get_required_capabilities, resolve_topic_arn, get_stacks, StackReference, matches_any, \
-    get_account_id, get_account_alias
+    get_account_id, get_account_alias, get_tag
 from .components import get_component, evaluate_template
 import senza
 from urllib.request import urlopen
@@ -63,10 +56,10 @@ STYLES = {
 
 TITLES = {
     'creation_time': 'Created',
-    'logical_resource_id': 'Resource ID',
+    'LogicalResourceId': 'Resource ID',
     'launch_time': 'Launched',
-    'resource_status': 'Status',
-    'resource_status_reason': 'Status Reason',
+    'ResourceStatus': 'Status',
+    'ResourceStatusReason': 'Status Reason',
     'lb_status': 'LB Status',
     'private_ip': 'Private IP',
     'public_ip': 'Public IP',
@@ -86,7 +79,7 @@ TITLES = {
 MAX_COLUMN_WIDTHS = {
     'description': 50,
     'stacks': 20,
-    'resource_status_reason': 50
+    'ResourceStatusReason': 50
 }
 
 
@@ -232,22 +225,30 @@ def handle_exceptions(func):
     def wrapper():
         try:
             func()
-        except boto.exception.NoAuthHandlerFound as e:
+        except botocore.exceptions.NoCredentialsError as e:
             sys.stdout.flush()
             sys.stderr.write('No AWS credentials found. ' +
                              'Use the "mai" command line tool to get a temporary access key\n')
             sys.stderr.write('or manually configure either ~/.aws/credentials ' +
                              'or AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY.\n')
             sys.exit(1)
-        except BotoServerError as e:
+        except botocore.exceptions.ClientError as e:
+            sys.stdout.flush()
             if is_credentials_expired_error(e):
-                sys.stdout.flush()
                 sys.stderr.write('AWS credentials have expired. ' +
                                  'Use the "mai" command line tool to get a new temporary access key.\n')
                 sys.exit(1)
             else:
                 raise
+        except:
+            # Catch All
+            sys.stdout.flush()
+            raise
     return wrapper
+
+
+def is_credentials_expired_error(e: botocore.exceptions.ClientError) -> bool:
+    return e.response['Error']['Code'] in ['ExpiredToken', 'RequestExpired']
 
 
 @click.group(cls=AliasedGroup, context_settings=CONTEXT_SETTINGS)
@@ -338,11 +339,6 @@ class AccountArguments:
         return attr
 
 
-def is_credentials_expired_error(e: BotoServerError) -> bool:
-    return (e.status == 400 and 'request has expired' in e.message.lower()) or \
-           (e.status == 403 and 'security token included in the request is expired' in e.message.lower())
-
-
 def parse_args(input, region, version, parameter, account_info):
     paras = {}
     defaults = {}
@@ -402,15 +398,15 @@ def get_region(region):
     if not region:
         raise click.UsageError('Please specify the AWS region on the command line (--region) or in ~/.aws/config')
 
-    cf = boto.cloudformation.connect_to_region(region)
+    cf = boto3.client('cloudformation', region)
     if not cf:
         raise click.UsageError('Invalid region "{}"'.format(region))
     return region
 
 
 def check_credentials(region):
-    iam = boto.iam.connect_to_region(region)
-    return iam.get_account_alias()
+    iam = boto3.client('iam')
+    return iam.list_account_aliases()
 
 
 def get_stack_refs(refs: list):
@@ -466,9 +462,9 @@ def list_stacks(region, stack_ref, all, output, w, watch):
         for stack in get_stacks(stack_refs, region, all=all):
             rows.append({'stack_name': stack.name,
                          'version': stack.version,
-                         'status': stack.stack_status,
-                         'creation_time': calendar.timegm(stack.creation_time.timetuple()),
-                         'description': stack.template_description})
+                         'status': stack.StackStatus,
+                         'creation_time': calendar.timegm(stack.CreationTime.timetuple()),
+                         'description': stack.TemplateDescription})
 
         rows.sort(key=lambda x: (x['stack_name'], x['version']))
 
@@ -625,10 +621,10 @@ def resources(stack_ref, region, w, watch, output):
                 d['creation_time'] = calendar.timegm(resource.timestamp.timetuple())
                 rows.append(d)
 
-        rows.sort(key=lambda x: (x['stack_name'], x['version'], x['logical_resource_id']))
+        rows.sort(key=lambda x: (x['stack_name'], x['version'], x['LogicalResourceId']))
 
         with OutputFormat(output):
-            print_table('stack_name version logical_resource_id resource_type resource_status creation_time'.split(),
+            print_table('stack_name version LogicalResourceId resource_type ResourceStatus creation_time'.split(),
                         rows, styles=STYLES, titles=TITLES)
 
 
@@ -643,26 +639,26 @@ def events(stack_ref, region, w, watch, output):
     stack_refs = get_stack_refs(stack_ref)
     region = get_region(region)
     check_credentials(region)
-    cf = boto.cloudformation.connect_to_region(region)
+    cf = boto3.client('cloudformation', region)
 
     for _ in watching(w, watch):
         rows = []
         for stack in get_stacks(stack_refs, region):
-            events = cf.describe_stack_events(stack.stack_name)
+            events = cf.describe_stack_events(StackName=stack.StackId)['StackEvents']
 
             for event in events:
-                d = event.__dict__
+                d = event
                 d['stack_name'] = stack.name
                 d['version'] = stack.version
-                d['resource_type'] = format_resource_type(d['resource_type'])
-                d['event_time'] = calendar.timegm(event.timestamp.timetuple())
+                d['resource_type'] = format_resource_type(d['ResourceType'])
+                d['event_time'] = calendar.timegm(event['Timestamp'].timetuple())
                 rows.append(d)
 
         rows.sort(key=lambda x: x['event_time'])
 
         with OutputFormat(output):
-            print_table(('stack_name version resource_type logical_resource_id ' +
-                        'resource_status resource_status_reason event_time').split(),
+            print_table(('stack_name version resource_type LogicalResourceId ' +
+                        'ResourceStatus ResourceStatusReason event_time').split(),
                         rows, styles=STYLES, titles=TITLES, max_column_widths=MAX_COLUMN_WIDTHS)
 
 
@@ -821,7 +817,7 @@ def status(stack_ref, region, output, w, watch):
                     if not name:
                         # physical resource ID will be empty during stack creation
                         continue
-                    if 'version' in res.logical_resource_id.lower():
+                    if 'version' in res.LogicalResourceId.lower():
                         try:
                             requests.get('https://{}/'.format(name), timeout=2)
                             http_status = 'OK'
@@ -839,7 +835,7 @@ def status(stack_ref, region, output, w, watch):
             instances = conn.get_only_instances(filters={'tag:aws:cloudformation:stack-id': stack.stack_id})
             rows.append({'stack_name': stack.name,
                          'version': stack.version,
-                         'status': stack.stack_status,
+                         'status': stack.StackStatus,
                          'total_instances': len(instances),
                          'running_instances': len([i for i in instances if i.state == 'running']),
                          'healthy_instances': len([i for i in instance_health.values() if i == 'IN_SERVICE']),
@@ -873,7 +869,7 @@ def domains(stack_ref, region, output, w, watch):
     for _ in watching(w, watch):
         rows = []
         for stack in get_stacks(stack_refs, region):
-            if stack.stack_status == 'ROLLBACK_COMPLETE':
+            if stack.StackStatus == 'ROLLBACK_COMPLETE':
                 # performance optimization: do not call EC2 API for "dead" stacks
                 continue
 
@@ -889,7 +885,7 @@ def domains(stack_ref, region, output, w, watch):
                     record = records_by_name.get((name, stack.stack_name)) or records_by_name.get((name, None))
                     rows.append({'stack_name': stack.name,
                                  'version': stack.version,
-                                 'resource_id': res.logical_resource_id,
+                                 'resource_id': res.LogicalResourceId,
                                  'domain': res.physical_resource_id,
                                  'weight': record.weight if record else None,
                                  'type': record.type if record else None,
@@ -934,36 +930,36 @@ def images(stack_ref, region, output, hide_older_than, show_instances):
     region = get_region(region)
     check_credentials(region)
 
-    conn = boto.ec2.connect_to_region(region)
+    ec2 = boto3.resource('ec2', region)
 
     instances_by_image = collections.defaultdict(list)
-    for inst in conn.get_only_instances():
-        if inst.state == 'terminated':
+    for inst in ec2.instances.all():
+        if inst.state['Name'] == 'terminated':
             # do not count TERMINATED EC2 instances
             continue
-        stack_name = inst.tags.get('aws:cloudformation:stack-name')
+        stack_name = get_tag(inst.tags, 'aws:cloudformation:stack-name')
         if not stack_refs or matches_any(stack_name, stack_refs):
             instances_by_image[inst.image_id].append(inst)
 
     images = {}
-    for image in conn.get_all_images(filters={'image-id': list(instances_by_image.keys())}):
+    for image in ec2.images.filter(ImageIds=list(instances_by_image.keys())):
         images[image.id] = image
     if not stack_refs:
-        filters = {'name': '*Taupage-*',
-                   'state': 'available'}
-        for image in conn.get_all_images(filters=filters):
+        filters = [{'Name': 'name', 'Values': ['*Taupage-*']},
+                   {'Name': 'state', 'Values': ['available']}]
+        for image in ec2.images.filter(Filters=filters):
             images[image.id] = image
     rows = []
     cutoff = datetime.datetime.now() - datetime.timedelta(days=hide_older_than)
     for image in images.values():
-        row = image.__dict__
-        creation_time = parse_time(image.creationDate)
+        row = image.meta.data
+        creation_time = parse_time(image.creation_date)
         row['creation_time'] = creation_time
         row['instances'] = ', '.join(sorted(i.id for i in instances_by_image[image.id]))
         row['total_instances'] = len(instances_by_image[image.id])
         stacks = set()
         for instance in instances_by_image[image.id]:
-            stack_name = instance.tags.get('aws:cloudformation:stack-name')
+            stack_name = get_tag(instance.tags, 'aws:cloudformation:stack-name')
             # EC2 instance might not be part of a CF stack
             if stack_name:
                 stacks.add(stack_name)
@@ -973,9 +969,9 @@ def images(stack_ref, region, output, hide_older_than, show_instances):
         if creation_time > cutoff.timestamp() or row['total_instances']:
             rows.append(row)
 
-    rows.sort(key=lambda x: x.get('name'))
+    rows.sort(key=lambda x: x.get('Name'))
     with OutputFormat(output):
-        cols = 'id name owner_id description stacks total_instances creation_time'
+        cols = 'ImageId Name OwnerId Description stacks total_instances creation_time'
         if show_instances:
             cols = cols.replace('total_instances', 'instances')
         print_table(cols.split(), rows, titles=TITLES, max_column_widths=MAX_COLUMN_WIDTHS)
