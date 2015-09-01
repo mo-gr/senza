@@ -1,18 +1,14 @@
 import collections
 import datetime
 import functools
-import boto.cloudformation
-import boto.ec2
-import boto.iam
 import time
 import boto3
 
 
 def get_security_group(region: str, sg_name: str):
-    conn = boto.ec2.connect_to_region(region)
-    all_security_groups = conn.get_all_security_groups()
-    for _sg in all_security_groups:
-        if _sg.name == sg_name:
+    ec2 = boto3.resource('ec2', region)
+    for _sg in ec2.security_groups.all():
+        if _sg.group_name == sg_name:
             return _sg
 
 
@@ -34,15 +30,13 @@ def resolve_security_groups(security_groups: list, region: str):
 
 def find_ssl_certificate_arn(region, pattern):
     '''Find the a matching SSL cert and return its ARN'''
-    iam_conn = boto.iam.connect_to_region(region)
-    response = iam_conn.list_server_certs()
-    response = response['list_server_certificates_response']
-    certs = response['list_server_certificates_result']['server_certificate_metadata_list']
+    iam = boto3.resource('iam')
     candidates = set()
+    certs = list(iam.server_certificates.all())
     for cert in certs:
         # only consider matching SSL certs or use the only one available
-        if pattern in cert['server_certificate_name'] or len(certs) == 1:
-            candidates.add(cert['arn'])
+        if pattern == cert.name or len(certs) == 1:
+            candidates.add(cert.server_certificate_metadata['Arn'])
     if candidates:
         # return first match (alphabetically sorted
         return sorted(candidates)[0]
@@ -90,12 +84,10 @@ def resolve_topic_arn(region, topic):
         topic_arn = topic
     else:
         # resolve topic name to ARN
-        sns = boto.sns.connect_to_region(region)
-        response = sns.get_all_topics()
-        topic_arn = False
-        for obj in response['ListTopicsResponse']['ListTopicsResult']['Topics']:
-            if obj['TopicArn'].endswith(topic):
-                topic_arn = obj['TopicArn']
+        sns = boto3.resource('sns', region)
+        for topic in sns.topics.all():
+            if topic.arn.endswith(topic):
+                topic_arn = topic.arn
 
     return topic_arn
 
@@ -126,6 +118,7 @@ class SenzaStackSummary:
 
 
 def get_stacks(stack_refs: list, region, all=False):
+    # boto3.resource('cf')-stacks.filter() doesn't support status_filter, only StackName
     cf = boto3.client('cloudformation', region)
     if all:
         status_filter = None

@@ -701,26 +701,27 @@ def init(definition_file, region, template, user_variable):
 def get_instance_health(elb, stack_name: str) -> dict:
     instance_health = {}
     try:
-        instance_states = elb.describe_instance_health(stack_name)
+        instance_states = elb.describe_instance_health(LoadBalancerName=stack_name)['InstanceStates']
         for istate in instance_states:
-            instance_health[istate.instance_id] = camel_case_to_underscore(istate.state).upper()
-    except boto.exception.BotoServerError as e:
+            instance_health[istate['InstanceId']] = camel_case_to_underscore(istate['State']).upper()
+    except botocore.exceptions.ClientError as e:
         # ignore non existing ELBs
         # ignore ValidationError "LoadBalancer name cannot be longer than 32 characters"
         # ignore rate limit exceeded errors
-        if e.code not in ('LoadBalancerNotFound', 'ValidationError', 'Throttling'):
+        if e.response['Error']['Code'] not in ('LoadBalancerNotFound', 'ValidationError', 'Throttling'):
             raise
     return instance_health
 
 
 def get_instance_user_data(instance) -> dict:
     try:
-        attrs = instance.get_attribute('userData')
-        data_b64 = attrs['userData']
+        attrs = instance.describe_attribute(Attribute='userData')
+        data_b64 = attrs['userData']['Value']
         data_yaml = base64.b64decode(data_b64)
         data_dict = yaml.load(data_yaml)
         return data_dict
-    except Exception as e:  # there's just too many ways this can fail, catch 'em all
+    except Exception as e:
+        # there's just too many ways this can fail, catch 'em all
         sys.stderr.write('Failed to query instance user data: {}\n'.format(e))
     return {}
 
@@ -744,40 +745,40 @@ def instances(stack_ref, all, terminated, docker_image, region, output, w, watch
     region = get_region(region)
     check_credentials(region)
 
-    conn = boto.ec2.connect_to_region(region)
-    elb = boto.ec2.elb.connect_to_region(region)
+    ec2 = boto3.resource('ec2', region)
+    elb = boto3.client('elb', region)
 
     if all:
-        filters = None
+        filters = []
     else:
         # filter out instances not part of any stack
-        filters = {'tag-key': 'aws:cloudformation:stack-name'}
+        filters = [{'Name': 'tag-key', 'Values': ['aws:cloudformation:stack-name']}]
 
     opt_docker_column = ' docker_source' if docker_image else ''
 
     for _ in watching(w, watch):
         rows = []
 
-        for instance in conn.get_only_instances(filters=filters):
-            cf_stack_name = instance.tags.get('aws:cloudformation:stack-name')
-            stack_name = instance.tags.get('StackName')
-            stack_version = instance.tags.get('StackVersion')
+        for instance in ec2.instances.filter(Filters=filters):
+            cf_stack_name = get_tag(instance.tags, 'aws:cloudformation:stack-name')
+            stack_name = get_tag(instance.tags, 'StackName')
+            stack_version = get_tag(instance.tags, 'StackVersion')
             if not stack_refs or matches_any(cf_stack_name, stack_refs):
                 instance_health = get_instance_health(elb, cf_stack_name)
-                if instance.state.upper() != 'TERMINATED' or terminated:
+                if instance.state['Name'].upper() != 'TERMINATED' or terminated:
 
                     docker_source = get_instance_docker_image_source(instance) if docker_image else ''
 
                     rows.append({'stack_name': stack_name or '',
                                  'version': stack_version or '',
-                                 'resource_id': instance.tags.get('aws:cloudformation:logical-id'),
+                                 'resource_id': get_tag(instance.tags, 'aws:cloudformation:logical-id'),
                                  'instance_id': instance.id,
-                                 'public_ip': instance.ip_address,
+                                 'public_ip': instance.public_ip_address,
                                  'private_ip': instance.private_ip_address,
-                                 'state': instance.state.upper().replace('-', '_'),
+                                 'state': instance.state['Name'].upper().replace('-', '_'),
                                  'lb_status': instance_health.get(instance.id),
                                  'docker_source': docker_source,
-                                 'launch_time': parse_time(instance.launch_time)})
+                                 'launch_time': instance.launch_time.timestamp()})
 
         rows.sort(key=lambda r: (r['stack_name'], r['version'], r['instance_id']))
 
@@ -799,25 +800,24 @@ def status(stack_ref, region, output, w, watch):
     region = get_region(region)
     check_credentials(region)
 
-    conn = boto.ec2.connect_to_region(region)
-    elb = boto.ec2.elb.connect_to_region(region)
-    cf = boto.cloudformation.connect_to_region(region)
+    ec2 = boto3.resource('ec2', region)
+    elb = boto3.client('elb', region)
+    cf = boto3.resource('cloudformation', region)
 
     for _ in watching(w, watch):
         rows = []
         for stack in sorted(get_stacks(stack_refs, region)):
-            instance_health = get_instance_health(elb, stack.stack_name)
+            instance_health = get_instance_health(elb, stack.StackName)
 
             main_dns_resolves = False
             http_status = None
-            resources = cf.describe_stack_resources(stack.stack_id)
-            for res in resources:
+            for res in cf.Stack(stack.StackId).resource_summaries.all():
                 if res.resource_type == 'AWS::Route53::RecordSet':
                     name = res.physical_resource_id
                     if not name:
                         # physical resource ID will be empty during stack creation
                         continue
-                    if 'version' in res.LogicalResourceId.lower():
+                    if 'version' in res.logical_id.lower():
                         try:
                             requests.get('https://{}/'.format(name), timeout=2)
                             http_status = 'OK'
@@ -829,15 +829,16 @@ def status(stack_ref, region, output, w, watch):
                         except:
                             answers = []
                         for answer in answers:
-                            if answer.target.to_text().startswith('{}-'.format(stack.stack_name)):
+                            if answer.target.to_text().startswith('{}-'.format(stack.StackName)):
                                 main_dns_resolves = True
 
-            instances = conn.get_only_instances(filters={'tag:aws:cloudformation:stack-id': stack.stack_id})
+            instances = list(ec2.instances.filter(Filters=[{'Name': 'tag:aws:cloudformation:stack-id',
+                                                            'Values': [stack.StackId]}]))
             rows.append({'stack_name': stack.name,
                          'version': stack.version,
                          'status': stack.StackStatus,
                          'total_instances': len(instances),
-                         'running_instances': len([i for i in instances if i.state == 'running']),
+                         'running_instances': len([i for i in instances if i.state['Name'] == 'running']),
                          'healthy_instances': len([i for i in instance_health.values() if i == 'IN_SERVICE']),
                          'lb_status': ','.join(set(instance_health.values())),
                          'main_dns': main_dns_resolves,
@@ -861,8 +862,8 @@ def domains(stack_ref, region, output, w, watch):
     region = get_region(region)
     check_credentials(region)
 
-    cf = boto.cloudformation.connect_to_region(region)
-    route53 = boto.route53.connect_to_region(region)
+    cf = boto3.resource('cloudformation', region)
+    route53 = boto3.client('route53')
 
     records_by_name = {}
 
@@ -873,24 +874,32 @@ def domains(stack_ref, region, output, w, watch):
                 # performance optimization: do not call EC2 API for "dead" stacks
                 continue
 
-            resources = cf.describe_stack_resources(stack.stack_id)
-            for res in resources:
+            for res in cf.Stack(stack.StackId).resource_summaries.all():
                 if res.resource_type == 'AWS::Route53::RecordSet':
                     name = res.physical_resource_id
                     if name not in records_by_name:
                         zone_name = name.split('.', 1)[1]
-                        zone = route53.get_zone(zone_name)
-                        for rec in zone.get_records():
-                            records_by_name[(rec.name.rstrip('.'), rec.identifier)] = rec
-                    record = records_by_name.get((name, stack.stack_name)) or records_by_name.get((name, None))
-                    rows.append({'stack_name': stack.name,
-                                 'version': stack.version,
-                                 'resource_id': res.LogicalResourceId,
-                                 'domain': res.physical_resource_id,
-                                 'weight': record.weight if record else None,
-                                 'type': record.type if record else None,
-                                 'value': ','.join(record.resource_records) if record else None,
-                                 'create_time': calendar.timegm(res.timestamp.timetuple())})
+
+                        zone = list(filter(lambda x: x['Name'] == zone_name + '.',
+                                           route53.list_hosted_zones_by_name(DNSName=zone_name + '.')['HostedZones'])
+                                    )[0]
+
+                        for rec in route53.list_resource_record_sets(HostedZoneId=zone['Id'])['ResourceRecordSets']:
+                            records_by_name[(rec['Name'].rstrip('.'), rec.get('SetIdentifier'))] = rec
+                    record = records_by_name.get((name, stack.StackName)) or records_by_name.get((name, None))
+                    row = {'stack_name': stack.name,
+                           'version': stack.version,
+                           'resource_id': res.logical_id,
+                           'domain': res.physical_resource_id,
+                           'weight': None,
+                           'type': None,
+                           'value': None,
+                           'create_time': calendar.timegm(res.last_updated_timestamp.timetuple())}
+                    if record:
+                        row.update({'weight': record.get('Weight'),
+                                    'type': record.get('Type'),
+                                    'value': ','.join([r['Value'] for r in record.get('ResourceRecords')])})
+                    rows.append(row)
 
         with OutputFormat(output):
             print_table('stack_name version resource_id domain weight type value create_time'.split(),
