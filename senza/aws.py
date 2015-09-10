@@ -3,13 +3,18 @@ import datetime
 import functools
 import time
 import boto3
+from botocore.exceptions import ClientError
 
 
 def get_security_group(region: str, sg_name: str):
     ec2 = boto3.resource('ec2', region)
-    for _sg in ec2.security_groups.all():
-        if _sg.group_name == sg_name:
-            return _sg
+    try:
+        return list(ec2.security_groups.filter(GroupNames=[sg_name]))[0]
+    except ClientError as e:
+        if e.response['Error']['Code'] == 'InvalidGroup.NotFound':
+            return None
+        else:
+            raise
 
 
 def resolve_security_groups(security_groups: list, region: str):

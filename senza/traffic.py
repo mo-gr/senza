@@ -9,7 +9,7 @@ PERCENT_RESOLUTION = 2
 FULL_PERCENTAGE = PERCENT_RESOLUTION * 100
 
 
-def get_weights(dns_name: str, identifier: str, rr: dict, all_identifiers) -> ({str: int}, int, int):
+def get_weights(dns_name: str, identifier: str, rr: list, all_identifiers) -> ({str: int}, int, int):
     """
     For the given dns_name, get the dns record weights from provided dns record set
     followed by partial count and partial weight sum.
@@ -19,13 +19,13 @@ def get_weights(dns_name: str, identifier: str, rr: dict, all_identifiers) -> ({
     partial_sum = 0
     known_record_weights = {}
     for r in rr:
-        if r.type == 'CNAME' and r.name == dns_name:
-            if r.weight:
-                w = int(r.weight)
+        if r['Type'] == 'CNAME' and r['Name'] == dns_name:
+            if r['Weight']:
+                w = int(r['Weight'])
             else:
                 w = 0
-            known_record_weights[r.identifier] = w
-            if r.identifier != identifier and w > 0:
+            known_record_weights[r['SetIdentifier']] = w
+            if r['SetIdentifier'] != identifier and w > 0:
                 # we should ignore all versions that do not get any traffic
                 # not to put traffic on the disabled versions when redistributing traffic weights
                 partial_sum += w
@@ -102,26 +102,36 @@ def compensate(calculation_error, compensations, identifier, new_record_weights,
     return percentage
 
 
-def set_new_weights(dns_name, identifier, lb_dns_name: str, new_record_weights, percentage, rr):
+def set_new_weights(dns_name, identifier, lb_dns_name: str, new_record_weights, percentage, rr, hosted_zone_id):
     action('Setting weights for {dns_name}..', **vars())
+    changes = []
     did_the_upsert = False
     for r in rr:
-        if r.type == 'CNAME' and r.name == dns_name:
-            w = new_record_weights[r.identifier]
+        if r['Type'] == 'CNAME' and r['Name'] == dns_name:
+            w = new_record_weights[r['SetIdentifier']]
             if w:
-                if int(r.weight) != w:
-                    r.weight = w
-                    rr.add_change_record('UPSERT', r)
-                if identifier == r.identifier:
+                if int(r['Weight']) != w:
+                    r['Weight'] = w
+                    changes.append({'Action': 'UPSERT',
+                                    'ResourceRecordSet': r})
+                if identifier == r['SetIdentifier']:
                     did_the_upsert = True
             else:
-                rr.add_change_record('DELETE', r)
+                changes.append({'Action': 'DELETE',
+                                'ResourceRecordSet': r.copy()})
     if new_record_weights[identifier] > 0 and not did_the_upsert:
-        change = rr.add_change('CREATE', dns_name, 'CNAME', ttl=20, identifier=identifier,
-                               weight=new_record_weights[identifier])
-        change.add_value(lb_dns_name)
-    if rr.changes:
-        rr.commit()
+        changes.append({'Action': 'UPSERT',
+                        'ResourceRecordSet': {'Name': dns_name,
+                                              'Type': 'CNAME',
+                                              'SetIdentifier': identifier,
+                                              'Weight': new_record_weights[identifier],
+                                              'TTL': 20,
+                                              'ResourceRecords': [{'Value': lb_dns_name}]}})
+    if changes:
+        route53 = boto3.client('route53')
+        route53.change_resource_record_sets(HostedZoneId=hosted_zone_id,
+                                            ChangeBatch={'Comment': 'Weight change of {}'.format(dns_name),
+                                                         'Changes': changes})
         if sum(new_record_weights.values()) == 0:
             ok(' DISABLED')
         else:
@@ -198,8 +208,6 @@ def get_stack_versions(stack_name: str, region: str):
             elif res.resource_type == 'AWS::Route53::RecordSet':
                 if 'version' not in res.logical_id.lower():
                     domain = res.physical_resource_id
-        from pprint import pprint
-        pprint((stack.StackId, stack_name, get_tag(details.tags, 'StackVersion'), domain, lb_dns_name))
         yield StackVersion(stack_name, get_tag(details.tags, 'StackVersion'), domain, lb_dns_name)
 
 
@@ -214,10 +222,35 @@ def get_zone(domain: str):
     route53 = boto3.client('route53')
     zone = list(filter(lambda x: x['Name'] == domain + '.',
                        route53.list_hosted_zones_by_name(DNSName=domain + '.')['HostedZones'])
-                )[0]
+                )
     if not zone:
         raise ValueError('Zone {} not found'.format(domain))
-    return zone
+    return zone[0]
+
+
+def get_records(domain: str):
+    route53 = boto3.client('route53')
+    zone = list(filter(lambda x: x['Name'] == domain + '.',
+                       route53.list_hosted_zones_by_name(DNSName=domain + '.')['HostedZones'])
+                )
+    if not zone:
+        raise ValueError('Zone {} not found'.format(domain))
+    else:
+        zone = zone[0]
+
+    result = route53.list_resource_record_sets(HostedZoneId=zone['Id'])
+    records = result['ResourceRecordSets']
+    while result['IsTruncated']:
+        recordfilter = {'HostedZoneId': zone['Id'],
+                        'StartRecordName': result['NextRecordName'],
+                        'StartRecordType': result['NextRecordType']
+                        }
+        if result.get('NextRecordIdentifier'):
+            recordfilter['StartRecordIdentifier'] = result.get('NextRecordIdentifier')
+
+        result = route53.list_resource_record_sets(**recordfilter)
+        records.extend(result['ResourceRecordSets'])
+    return records
 
 
 def print_version_traffic(stack_ref: StackReference, region):
@@ -236,8 +269,7 @@ def print_version_traffic(stack_ref: StackReference, region):
         raise click.UsageError('Stack {} version {} has no domain'.format(version.name, version.version))
 
     domain = version.domain.split('.', 1)[1]
-    zone = get_zone(region, domain)
-    rr = zone.get_records()
+    rr = get_records(domain)
     known_record_weights, partial_count, partial_sum = get_weights(version.dns_name, version.identifier, rr,
                                                                    identifier_versions.keys())
 
@@ -275,8 +307,8 @@ def change_version_traffic(stack_ref: StackReference, percentage: float, region)
         raise click.UsageError('Stack {} version {} has no domain'.format(version.name, version.version))
 
     domain = version.domain.split('.', 1)[1]
-    zone = get_zone(region, domain)
-    rr = zone.get_records()
+    zone = get_zone(domain)
+    rr = get_records(domain)
     percentage = int(percentage * PERCENT_RESOLUTION)
     known_record_weights, partial_count, partial_sum = get_weights(version.dns_name, identifier, rr,
                                                                    identifier_versions.keys())
@@ -310,4 +342,4 @@ def change_version_traffic(stack_ref: StackReference, percentage: float, region)
                              new_record_weights,
                              compensations,
                              deltas)
-    set_new_weights(version.dns_name, identifier, version.lb_dns_name, new_record_weights, percentage, rr)
+    set_new_weights(version.dns_name, identifier, version.lb_dns_name, new_record_weights, percentage, rr, zone['Id'])

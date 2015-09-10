@@ -1,5 +1,5 @@
 
-import boto.iam
+import boto3
 import json
 import urllib
 
@@ -19,7 +19,7 @@ def get_merged_policies(roles: list, region: str):
     return policies
 
 
-def component_iam_role(definition, configuration, args, info, force):
+def component_iam_role(definition, configuration, args, info, force, account_info):
     definition = ensure_keys(definition, "Resources")
     role_name = configuration['Name']
     definition['Resources'][role_name] = {

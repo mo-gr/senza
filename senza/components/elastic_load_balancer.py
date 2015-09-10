@@ -20,7 +20,7 @@ def get_load_balancer_name(stack_name: str, stack_version: str):
     return '{}-{}'.format(stack_name[:l], stack_version)
 
 
-def component_elastic_load_balancer(definition, configuration, args, info, force):
+def component_elastic_load_balancer(definition, configuration, args, info, force, account_info):
     lb_name = configuration["Name"]
 
     # domains pointing to the load balancer
@@ -35,7 +35,7 @@ def component_elastic_load_balancer(definition, configuration, args, info, force
                     {"Fn::GetAtt": [lb_name, "DNSName"]}
                 ],
                 "Name": "{0}.{1}".format(domain["Subdomain"], domain["Zone"]),
-                "HostedZoneName": "{0}.".format(domain["Zone"])
+                "HostedZoneName": "{0}".format(domain["Zone"])
             },
         }
 

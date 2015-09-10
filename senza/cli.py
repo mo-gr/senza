@@ -21,7 +21,7 @@ import requests
 import yaml
 import base64
 import boto3
-import botocore
+from botocore.exceptions import NoCredentialsError, ClientError
 
 from .aws import parse_time, get_required_capabilities, resolve_topic_arn, get_stacks, StackReference, matches_any, \
     get_account_id, get_account_alias, get_tag
@@ -29,9 +29,9 @@ from .components import get_component, evaluate_template
 import senza
 from urllib.request import urlopen
 from urllib.parse import quote
-from .traffic import change_version_traffic, print_version_traffic
+from .traffic import change_version_traffic, print_version_traffic, get_records
 from .utils import named_value, camel_case_to_underscore, pystache_render
-
+from pprint import pprint
 
 CONTEXT_SETTINGS = dict(help_option_names=['-h', '--help'])
 
@@ -73,7 +73,8 @@ TITLES = {
     'http_status': 'HTTP',
     'main_dns': 'Main DNS',
     'id': 'ID',
-    'owner_id': 'Owner'
+    'ImageId': 'Image ID',
+    'OwnerId': 'Owner'
 }
 
 MAX_COLUMN_WIDTHS = {
@@ -210,7 +211,7 @@ def evaluate(definition, args, account_info, force: bool):
         if not componentfn:
             raise click.UsageError('Component "{}" does not exist'.format(componenttype))
 
-        definition = componentfn(definition, configuration, args, info, force)
+        definition = componentfn(definition, configuration, args, info, force, account_info)
 
     # throw executed template to templating engine and provide all information for substitutions
     template = yaml.dump(definition, default_flow_style=False)
@@ -225,14 +226,14 @@ def handle_exceptions(func):
     def wrapper():
         try:
             func()
-        except botocore.exceptions.NoCredentialsError as e:
+        except NoCredentialsError as e:
             sys.stdout.flush()
             sys.stderr.write('No AWS credentials found. ' +
                              'Use the "mai" command line tool to get a temporary access key\n')
             sys.stderr.write('or manually configure either ~/.aws/credentials ' +
                              'or AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY.\n')
             sys.exit(1)
-        except botocore.exceptions.ClientError as e:
+        except ClientError as e:
             sys.stdout.flush()
             if is_credentials_expired_error(e):
                 sys.stderr.write('AWS credentials have expired. ' +
@@ -247,7 +248,7 @@ def handle_exceptions(func):
     return wrapper
 
 
-def is_credentials_expired_error(e: botocore.exceptions.ClientError) -> bool:
+def is_credentials_expired_error(e: ClientError) -> bool:
     return e.response['Error']['Code'] in ['ExpiredToken', 'RequestExpired']
 
 
@@ -502,7 +503,7 @@ def create(definition, region, version, parameter, disable_rollback, dry_run, fo
 
     parameters = []
     for name, parameter in data.get("Parameters", {}).items():
-        parameters.append([name, getattr(args, name, None)])
+        parameters.append({'ParameterKey': name, 'ParameterValue': getattr(args, name, None)})
 
     tags = {}
     for tag in input["SenzaInfo"].get('Tags', []):
@@ -515,6 +516,9 @@ def create(definition, region, version, parameter, disable_rollback, dry_run, fo
         "StackName": input["SenzaInfo"]["StackName"],
         "StackVersion": version
     })
+    tags_list = []
+    for k, v in tags.items():
+        tags_list.append({'Key': k, 'Value': v})
 
     if "OperatorTopicId" in input["SenzaInfo"]:
         topic = input["SenzaInfo"]["OperatorTopicId"]
@@ -523,21 +527,21 @@ def create(definition, region, version, parameter, disable_rollback, dry_run, fo
             fatal_error('Error: SNS topic "{}" does not exist'.format(topic))
         topics = [topic_arn]
     else:
-        topics = None
+        topics = []
 
     capabilities = get_required_capabilities(data)
 
-    cf = boto.cloudformation.connect_to_region(region)
+    cf = boto3.client('cloudformation', region)
 
     with Action('Creating Cloud Formation stack {}..'.format(stack_name)) as act:
         try:
             if dry_run:
                 info('**DRY-RUN** {}'.format(topics))
             else:
-                cf.create_stack(stack_name, template_body=cfjson, parameters=parameters, tags=tags,
-                                notification_arns=topics, disable_rollback=disable_rollback, capabilities=capabilities)
-        except boto.exception.BotoServerError as e:
-            if e.error_code == 'AlreadyExistsException':
+                cf.create_stack(StackName=stack_name, TemplateBody=cfjson, Parameters=parameters, Tags=tags_list,
+                                NotificationARNs=topics, DisableRollback=disable_rollback, Capabilities=capabilities)
+        except ClientError as e:
+            if e.response['Error']['Code'] == 'AlreadyExistsException':
                 act.fatal_error('Stack {} already exists. Please choose another version.'.format(stack_name))
             else:
                 raise
@@ -572,7 +576,7 @@ def delete(stack_ref, region, dry_run, force):
     stack_refs = get_stack_refs(stack_ref)
     region = get_region(region)
     check_credentials(region)
-    cf = boto.cloudformation.connect_to_region(region)
+    cf = boto3.client('cloudformation', region)
 
     if not stack_refs:
         raise click.UsageError('Please specify at least one stack')
@@ -586,7 +590,7 @@ def delete(stack_ref, region, dry_run, force):
     for stack in stacks:
         with Action('Deleting Cloud Formation stack {}..'.format(stack.stack_name)):
             if not dry_run:
-                cf.delete_stack(stack.stack_name)
+                cf.delete_stack(StackName=stack.stack_name)
 
 
 def format_resource_type(resource_type):
@@ -606,19 +610,19 @@ def resources(stack_ref, region, w, watch, output):
     stack_refs = get_stack_refs(stack_ref)
     region = get_region(region)
     check_credentials(region)
-    cf = boto.cloudformation.connect_to_region(region)
+    cf = boto3.client('cloudformation', region)
 
     for _ in watching(w, watch):
         rows = []
         for stack in get_stacks(stack_refs, region):
-            resources = cf.describe_stack_resources(stack.stack_name)
+            resources = cf.describe_stack_resources(StackName=stack.stack_name)['StackResources']
 
             for resource in resources:
-                d = resource.__dict__
+                d = resource.copy()
                 d['stack_name'] = stack.name
                 d['version'] = stack.version
-                d['resource_type'] = format_resource_type(d['resource_type'])
-                d['creation_time'] = calendar.timegm(resource.timestamp.timetuple())
+                d['resource_type'] = format_resource_type(d['ResourceType'])
+                d['creation_time'] = calendar.timegm(resource['Timestamp'].timetuple())
                 rows.append(d)
 
         rows.sort(key=lambda x: (x['stack_name'], x['version'], x['LogicalResourceId']))
@@ -647,7 +651,7 @@ def events(stack_ref, region, w, watch, output):
             events = cf.describe_stack_events(StackName=stack.StackId)['StackEvents']
 
             for event in events:
-                d = event
+                d = event.copy()
                 d['stack_name'] = stack.name
                 d['version'] = stack.version
                 d['resource_type'] = format_resource_type(d['ResourceType'])
@@ -704,7 +708,7 @@ def get_instance_health(elb, stack_name: str) -> dict:
         instance_states = elb.describe_instance_health(LoadBalancerName=stack_name)['InstanceStates']
         for istate in instance_states:
             instance_health[istate['InstanceId']] = camel_case_to_underscore(istate['State']).upper()
-    except botocore.exceptions.ClientError as e:
+    except ClientError as e:
         # ignore non existing ELBs
         # ignore ValidationError "LoadBalancer name cannot be longer than 32 characters"
         # ignore rate limit exceeded errors
@@ -716,7 +720,7 @@ def get_instance_health(elb, stack_name: str) -> dict:
 def get_instance_user_data(instance) -> dict:
     try:
         attrs = instance.describe_attribute(Attribute='userData')
-        data_b64 = attrs['userData']['Value']
+        data_b64 = attrs['UserData']['Value']
         data_yaml = base64.b64decode(data_b64)
         data_dict = yaml.load(data_yaml)
         return data_dict
@@ -863,7 +867,6 @@ def domains(stack_ref, region, output, w, watch):
     check_credentials(region)
 
     cf = boto3.resource('cloudformation', region)
-    route53 = boto3.client('route53')
 
     records_by_name = {}
 
@@ -880,11 +883,7 @@ def domains(stack_ref, region, output, w, watch):
                     if name not in records_by_name:
                         zone_name = name.split('.', 1)[1]
 
-                        zone = list(filter(lambda x: x['Name'] == zone_name + '.',
-                                           route53.list_hosted_zones_by_name(DNSName=zone_name + '.')['HostedZones'])
-                                    )[0]
-
-                        for rec in route53.list_resource_record_sets(HostedZoneId=zone['Id'])['ResourceRecordSets']:
+                        for rec in get_records(zone_name):
                             records_by_name[(rec['Name'].rstrip('.'), rec.get('SetIdentifier'))] = rec
                     record = records_by_name.get((name, stack.StackName)) or records_by_name.get((name, None))
                     row = {'stack_name': stack.name,
@@ -896,7 +895,7 @@ def domains(stack_ref, region, output, w, watch):
                            'value': None,
                            'create_time': calendar.timegm(res.last_updated_timestamp.timetuple())}
                     if record:
-                        row.update({'weight': record.get('Weight'),
+                        row.update({'weight': str(record.get('Weight', '')),
                                     'type': record.get('Type'),
                                     'value': ','.join([r['Value'] for r in record.get('ResourceRecords')])})
                     rows.append(row)
@@ -1048,32 +1047,34 @@ def console(instance_or_stack_ref, limit, region, w, watch):
 
     INSTANCE_OR_STACK_REF can be an instance ID, private IP address or stack name/version.'''
 
-    if all(x.startswith('i-') for x in instance_or_stack_ref):
+    if instance_or_stack_ref and all(x.startswith('i-') for x in instance_or_stack_ref):
         stack_refs = None
-        filters = {'instance-id': list(instance_or_stack_ref)}
-    elif all(is_ip_address(x) for x in instance_or_stack_ref):
+        filters = [{'Name': 'instance-id', 'Values': list(instance_or_stack_ref)}]
+    elif instance_or_stack_ref and all(is_ip_address(x) for x in instance_or_stack_ref):
         stack_refs = None
-        filters = {'private-ip-address': list(instance_or_stack_ref)}
+        filters = [{'Name': 'private-ip-address', 'Values': list(instance_or_stack_ref)}]
     else:
         stack_refs = get_stack_refs(instance_or_stack_ref)
         # filter out instances not part of any stack
-        filters = {'tag-key': 'aws:cloudformation:stack-name'}
+        filters = [{'Name': 'tag-key', 'Values': ['aws:cloudformation:stack-name']}]
 
     region = get_region(region)
     check_credentials(region)
 
-    conn = boto.ec2.connect_to_region(region)
+    ec2 = boto3.resource('ec2', region)
 
     for _ in watching(w, watch):
 
-        for instance in conn.get_only_instances(filters=filters):
-            cf_stack_name = instance.tags.get('aws:cloudformation:stack-name')
+        for instance in ec2.instances.filter(Filters=filters):
+            cf_stack_name = get_tag(instance.tags, 'aws:cloudformation:stack-name')
             if not stack_refs or matches_any(cf_stack_name, stack_refs):
-                output = conn.get_console_output(instance.id)
-                click.secho('Showing last {} lines of {}..'.format(limit, instance.private_ip_address or instance.id),
+                output = instance.console_output()
+                click.secho('Showing last {} lines of {}/{}..'.format(limit,
+                                                                      cf_stack_name,
+                                                                      instance.private_ip_address or instance.id),
                             bold=True)
-                if output.output:
-                    for line in output.output.decode('utf-8', errors='replace').split('\n')[-limit:]:
+                if output['Output']:
+                    for line in output['Output'].split('\n')[-limit:]:
                         print_console(line)
 
 
@@ -1087,12 +1088,12 @@ def dump(stack_ref, region, output):
     region = get_region(region)
     check_credentials(region)
 
-    conn = boto.cloudformation.connect_to_region(region)
+    cf = boto3.client('cloudformation', region)
 
     for stack in get_stacks(stack_refs, region):
-        result = conn.get_template(stack.stack_name)
-        template = result['GetTemplateResponse']['GetTemplateResult']['TemplateBody']
-        print_json(template, output)
+        data = cf.get_template(StackName=stack.StackName)['TemplateBody']
+        cfjson = json.dumps(data, sort_keys=True, indent=4)
+        print_json(cfjson, output)
 
 
 def main():

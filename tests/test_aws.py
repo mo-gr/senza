@@ -1,6 +1,6 @@
 from unittest.mock import MagicMock
 from senza.aws import resolve_topic_arn
-import boto.ec2
+import boto3
 from senza.aws import get_security_group, resolve_security_groups, get_account_id, get_account_alias
 
 def test_resolve_security_groups(monkeypatch):
