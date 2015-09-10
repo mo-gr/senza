@@ -1,16 +1,15 @@
-from boto.route53.record import ResourceRecordSets
 import click
 from clickclick import warning, action, ok, print_table, Action
 import collections
-from .aws import get_stacks, StackReference
+from .aws import get_stacks, StackReference, get_tag
 
-import boto.route53
+import boto3
 
 PERCENT_RESOLUTION = 2
 FULL_PERCENTAGE = PERCENT_RESOLUTION * 100
 
 
-def get_weights(dns_name: str, identifier: str, rr: ResourceRecordSets, all_identifiers) -> ({str: int}, int, int):
+def get_weights(dns_name: str, identifier: str, rr: dict, all_identifiers) -> ({str: int}, int, int):
     """
     For the given dns_name, get the dns record weights from provided dns record set
     followed by partial count and partial weight sum.
@@ -184,23 +183,24 @@ class StackVersion(collections.namedtuple('StackVersion', 'name version domain l
 
 
 def get_stack_versions(stack_name: str, region: str):
-    cf = boto.cloudformation.connect_to_region(region)
+    cf = boto3.resource('cloudformation', region)
     for stack in get_stacks([StackReference(name=stack_name, version=None)], region):
-        if stack.stack_status in ('ROLLBACK_COMPLETE', 'CREATE_FAILED'):
+        if stack.StackStatus in ('ROLLBACK_COMPLETE', 'CREATE_FAILED'):
             continue
-        details = cf.describe_stacks(stack.stack_id)[0]
-        resources = cf.describe_stack_resources(stack.stack_id)
+        details = cf.Stack(stack.StackId)
         lb_dns_name = None
         domain = None
-        for res in resources:
+        for res in details.resource_summaries.all():
             if res.resource_type == 'AWS::ElasticLoadBalancing::LoadBalancer':
-                elb = boto.ec2.elb.connect_to_region(region)
-                lbs = elb.get_all_load_balancers([res.physical_resource_id])
-                lb_dns_name = lbs[0].dns_name
+                elb = boto3.client('elb', region)
+                lbs = elb.describe_load_balancers(LoadBalancerNames=[res.physical_resource_id])
+                lb_dns_name = lbs['LoadBalancerDescriptions'][0]['DNSName']
             elif res.resource_type == 'AWS::Route53::RecordSet':
-                if 'version' not in res.logical_resource_id.lower():
+                if 'version' not in res.logical_id.lower():
                     domain = res.physical_resource_id
-        yield StackVersion(stack_name, details.tags.get('StackVersion'), domain, lb_dns_name)
+        from pprint import pprint
+        pprint((stack.StackId, stack_name, get_tag(details.tags, 'StackVersion'), domain, lb_dns_name))
+        yield StackVersion(stack_name, get_tag(details.tags, 'StackVersion'), domain, lb_dns_name)
 
 
 def get_version(versions: list, version: str):
@@ -210,9 +210,11 @@ def get_version(versions: list, version: str):
     raise click.UsageError('Stack version {} not found'.format(version))
 
 
-def get_zone(region: str, domain: str):
-    dns_conn = boto.route53.connect_to_region(region)
-    zone = dns_conn.get_zone(domain + '.')
+def get_zone(domain: str):
+    route53 = boto3.client('route53')
+    zone = list(filter(lambda x: x['Name'] == domain + '.',
+                       route53.list_hosted_zones_by_name(DNSName=domain + '.')['HostedZones'])
+                )[0]
     if not zone:
         raise ValueError('Zone {} not found'.format(domain))
     return zone
