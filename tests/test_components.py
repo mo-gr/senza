@@ -8,6 +8,7 @@ from senza.components.stups_auto_configuration import component_stups_auto_confi
 from senza.components.redis_node import component_redis_node
 from senza.components.redis_cluster import component_redis_cluster
 
+
 def test_invalid_component():
     assert get_component('Foobar') is None
 

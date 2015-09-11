@@ -681,6 +681,7 @@ def init(definition_file, region, template, user_variable):
     '''Initialize a new Senza definition'''
     region = get_region(region)
     check_credentials(region)
+    account_info = AccountArguments(region=region)
 
     templates = []
     for mod in os.listdir(os.path.join(os.path.dirname(__file__), 'templates')):
@@ -696,7 +697,7 @@ def init(definition_file, region, template, user_variable):
     for key_val in user_variable:
         key, val = key_val
         variables[key] = val
-    variables = module.gather_user_variables(variables, region)
+    variables = module.gather_user_variables(variables, region, account_info)
     with Action('Generating Senza definition file {}..'.format(definition_file.name)):
         definition = module.generate_definition(variables)
         definition_file.write(definition)

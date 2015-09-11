@@ -61,16 +61,23 @@ def check_security_group(sg_name, rules, region, allow_from_self=False):
                                             VpcId=vpc['VpcId'])
             ec2c.create_tags(Resources=[sg['GroupId']],
                              Tags=[{'Key': 'Name', 'Value': sg_name}])
+            ip_permissions = []
             for proto, port in rules:
-                ec2sg.authorize(ip_protocol=proto, from_port=port, to_port=port, cidr_ip='0.0.0.0/0')
+                ip_permissions.append({'IpProtocol': proto,
+                                       'FromPort': port,
+                                       'ToPort': port,
+                                       'IpRanges': [{'CidrIp': '0.0.0.0/0'}]})
             if allow_from_self:
-                ec2sg.authorize(ip_protocol='tcp', from_port=0, to_port=65535, src_group=sg)
+                ip_permissions.append({'IpProtocol': '-1',
+                                       'UserIdGroupPairs': [{'GroupId': sg['GroupId']}]})
+            ec2c.authorize_security_group_ingress(GroupId=sg['GroupId'],
+                                                  IpPermissions=ip_permissions)
         return set()
 
 
 def get_mint_bucket_name(region: str):
-    account_id = get_account_id(region)
-    account_alias = get_account_alias(region)
+    account_id = get_account_id()
+    account_alias = get_account_alias()
     s3 = boto3.resource('s3')
     parts = account_alias.split('-')
     prefix = parts[0]
