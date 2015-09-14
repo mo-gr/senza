@@ -615,7 +615,7 @@ def resources(stack_ref, region, w, watch, output):
     for _ in watching(w, watch):
         rows = []
         for stack in get_stacks(stack_refs, region):
-            resources = cf.describe_stack_resources(StackName=stack.stack_name)['StackResources']
+            resources = cf.describe_stack_resources(StackName=stack.StackName)['StackResources']
 
             for resource in resources:
                 d = resource.copy()
