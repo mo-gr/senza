@@ -142,7 +142,7 @@ def test_print_account_info(monkeypatch):
                                                'TaupageConfig': {'runtime': 'Docker',
                                                                  'source': 'foo/bar'},
                                                'Type': 'Senza::TaupageAutoScalingGroup'}}],
-            'SenzaInfo': {'StackName': 'test-'}}
+            'SenzaInfo': {'StackName': 'test-{{AccountInfo.Region}}'}}
 
     runner = CliRunner()
 
@@ -152,7 +152,43 @@ def test_print_account_info(monkeypatch):
 
         result = runner.invoke(cli, ['print', 'myapp.yaml', '--region=myregion', '123'],
                                catch_exceptions=False)
-    assert 'test-myregion' in result.output
+    assert '"StackName": "test-myregion",' in result.output
+    assert 'AppImage-dummy-0123456789' in result.output
+
+
+def test_print_account_info_and_arguments_in_name(monkeypatch):
+    def my_resource(rtype, *args):
+        if rtype == 'ec2':
+            ec2 = MagicMock()
+            ec2.security_groups.filter.return_value = [MagicMock(name='app-master-mind', id='sg-007')]
+            return ec2
+        return MagicMock()
+
+    monkeypatch.setattr('boto3.resource', my_resource)
+
+    boto3 = MagicMock()
+    boto3.get_user.return_value = {'User': {'Arn': 'arn:aws:iam::0123456789:user/admin'}}
+    boto3.list_account_aliases.return_value = {'AccountAliases': ['org-dummy']}
+
+    monkeypatch.setattr('boto3.client', MagicMock(return_value=boto3))
+    data = {'SenzaComponents': [{'Configuration': {'ServerSubnets': {'eu-west-1': ['subnet-123']},
+                                                   'Type': 'Senza::Configuration'}},
+                                {'AppServer': {'Image': 'AppImage-{{AccountInfo.TeamID}}-{{AccountInfo.AccountID}}',
+                                               'InstanceType': 't2.micro',
+                                               'TaupageConfig': {'runtime': 'Docker',
+                                                                 'source': 'foo/bar'},
+                                               'Type': 'Senza::TaupageAutoScalingGroup'}}],
+            'SenzaInfo': {'StackName': 'test-{{AccountInfo.Region}}-{{Arguments.Section}}',
+                          'Parameters': [{'Section': {'Description': 'Section for A/B Test'}}]}}
+    runner = CliRunner()
+
+    with runner.isolated_filesystem():
+        with open('myapp.yaml', 'w') as fd:
+            yaml.dump(data, fd)
+
+        result = runner.invoke(cli, ['print', 'myapp.yaml', '--region=myregion', '123', 'B'],
+                               catch_exceptions=False)
+    assert '"StackName": "test-myregion-B",' in result.output
     assert 'AppImage-dummy-0123456789' in result.output
 
 

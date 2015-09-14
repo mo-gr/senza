@@ -189,6 +189,8 @@ def evaluate(definition, args, account_info, force: bool):
     # extract Senza* meta information
     info = definition.pop("SenzaInfo")
     info["StackVersion"] = args.version
+    # replace Arguments and AccountInfo Variabales in info section
+    info = yaml.load(evaluate_template(yaml.dump(info), {}, {}, args, account_info))
 
     template = yaml.dump(definition, default_flow_style=False)
     definition = evaluate_template(template, info, [], args, account_info)
@@ -280,6 +282,8 @@ class AccountArguments:
     'superteam'
     >>> test.Domain
     'test.example.org.'
+    >>> test.Region
+    'blubber'
     >>> test.blubber
     Traceback (most recent call last):
       File "<stdin>", line 1, in <module>
@@ -560,8 +564,6 @@ def print_cfjson(definition, region, version, parameter, output, force):
     region = get_region(region)
     check_credentials(region)
     account_info = AccountArguments(region=region)
-    pprint(account_info)
-    pprint(account_info.Region)
     args = parse_args(input, region, version, parameter, account_info)
     data = evaluate(input.copy(), args, account_info, force)
     cfjson = json.dumps(data, sort_keys=True, indent=4)
