@@ -35,5 +35,4 @@ def test_get_stack_versions(monkeypatch):
         return_value=[SenzaStackSummary(stack), SenzaStackSummary({'StackStatus': 'ROLLBACK_COMPLETE',
                                                                    'StackName': 'my-stack-1'})]))
     stack_version = list(get_stack_versions('my-stack', 'my-region'))
-    print(stack_version)
     assert stack_version == [StackVersion('my-stack', '1', 'myapp.example.org', 'elb-dns-name')]

@@ -179,17 +179,18 @@ def matches_any(cf_stack_name: str, stack_refs: list):
 
 def get_tag(tags: list, key: str):
     '''
-    >>> get_tag([{'Key': 'aws:cloudformation:stack-id', 'Value': 'arn:aws:cloudformation:eu-west-1:123:stack/test-123'},
-    ... {'Key': 'Name', 'Value': 'test-123'},
-    ... {'Key': 'StackVersion', 'Value': 123'}], 'StackVersion')
+    >>> tags = [{'Key': 'aws:cloudformation:stack-id',
+    ...          'Value': 'arn:aws:cloudformation:eu-west-1:123:stack/test-123'},
+    ...         {'Key': 'Name',
+    ...          'Value': 'test-123'},
+    ...         {'Key': 'StackVersion',
+    ...          'Value': '123'}]
+    >>> get_tag(tags, 'StackVersion')
     '123'
-    >>> get_tag([{'Key': 'aws:cloudformation:stack-id', 'Value': 'arn:aws:cloudformation:eu-west-1:123:stack/test-123'},
-    ... {'Key': 'Name', 'Value': 'test-123'},
-    ... {'Key': 'StackVersion', 'Value': 123'}], 'aws:cloudformation:stack-id')
+    >>> get_tag(tags, 'aws:cloudformation:stack-id')
     'arn:aws:cloudformation:eu-west-1:123:stack/test-123'
-    >>> get_tag([{'Key': 'aws:cloudformation:stack-id', 'Value': 'arn:aws:cloudformation:eu-west-1:123:stack/test-123'},
-    ... {'Key': 'Name', 'Value': 'test-123'},
-    ... {'Key': 'StackVersion', 'Value': 123'}], 'notfound')
+    >>> get_tag(tags, 'notfound') is None
+    True
     '''
     found = [tag['Value'] for tag in tags if tag['Key'] == key]
     if len(found):

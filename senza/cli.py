@@ -885,6 +885,7 @@ def domains(stack_ref, region, output, w, watch):
             for res in cf.Stack(stack.StackId).resource_summaries.all():
                 if res.resource_type == 'AWS::Route53::RecordSet':
                     name = res.physical_resource_id
+                    print('>>>>>>{}'.format(name))
                     if name not in records_by_name:
                         zone_name = name.split('.', 1)[1]
 
@@ -965,7 +966,7 @@ def images(stack_ref, region, output, hide_older_than, show_instances):
     rows = []
     cutoff = datetime.datetime.now() - datetime.timedelta(days=hide_older_than)
     for image in images.values():
-        row = image.meta.data
+        row = image.meta.data.copy()
         creation_time = parse_time(image.creation_date)
         row['creation_time'] = creation_time
         row['instances'] = ', '.join(sorted(i.id for i in instances_by_image[image.id]))
