@@ -938,8 +938,6 @@ def test_traffic(monkeypatch):
     monkeypatch.setattr('boto3.client', my_client)
     monkeypatch.setattr('boto3.resource', my_resource)
 
-    r53conn = Mock(name='r53conn')
-
     stacks = [
         StackVersion('myapp', 'v1', 'myapp.example.org', 'some-lb'),
         StackVersion('myapp', 'v2', 'myapp.example.org', 'another-elb'),
@@ -952,12 +950,10 @@ def test_traffic(monkeypatch):
     # this is a lot of dirty and nasty code. Please, somebody help this code.
 
     def record(dns_identifier, weight):
-        rec = MagicMock(name=dns_identifier + '-record',
-                        weight=weight,
-                        identifier=dns_identifier,
-                        type='CNAME')
-        rec.name = 'myapp.example.org.'
-        return rec
+        return {'Name': 'myapp.example.org.',
+                'Weight': str(weight),
+                'SetIdentifier': dns_identifier,
+                'Type': 'CNAME'}
 
     rr = MagicMock()
     records = collections.OrderedDict()
@@ -970,25 +966,19 @@ def test_traffic(monkeypatch):
         records[dns_identifier] = record(dns_identifier, percentage * PERCENT_RESOLUTION)
 
     rr.__iter__ = lambda x: iter(records.values())
+    monkeypatch.setattr('senza.traffic.get_records', MagicMock(return_value=rr))
+    monkeypatch.setattr('senza.traffic.get_zone', MagicMock(return_value={'Id': 'dummyid'}))
 
-    def add_change(op, dns_name, rtype, ttl, identifier, weight):
-        if op == 'CREATE':
-            x = MagicMock(weight=weight, identifier=identifier)
-            x.name = "myapp.example.org."
-            x.type = "CNAME"
-            records[identifier] = x
-        return MagicMock(name='change')
+    def change_rr_set(HostedZoneId, ChangeBatch):
+        for change in ChangeBatch['Changes']:
+            action = change['Action']
+            rrset = change['ResourceRecordSet']
+            if action == 'UPSERT':
+                records[rrset['SetIdentifier']] = rrset.copy()
+            elif action == 'DELETE':
+                records[rrset['SetIdentifier']]['Weight'] = 0
 
-    def add_change_record(op, record):
-        if op == 'DELETE':
-            records[record.identifier].weight = 0
-        elif op == 'UPSERT':
-            records[record.identifier].weight = record.weight
-
-    rr.add_change = add_change
-    rr.add_change_record = add_change_record
-
-    r53conn().get_zone().get_records.return_value = rr
+    route53.change_resource_record_sets = change_rr_set
 
     runner = CliRunner()
 
@@ -999,7 +989,7 @@ def test_traffic(monkeypatch):
         return result
 
     def weights():
-        return [r.weight for r in records.values()]
+        return [r['Weight'] for r in records.values()]
 
     with runner.isolated_filesystem():
         run(['v4', '100'])
