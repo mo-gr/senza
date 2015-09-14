@@ -4,6 +4,7 @@ from click.testing import CliRunner
 import collections
 from unittest.mock import MagicMock, Mock
 import yaml
+import json
 from senza.cli import cli, handle_exceptions, AccountArguments
 import botocore.exceptions
 from senza.traffic import PERCENT_RESOLUTION, StackVersion
@@ -61,7 +62,7 @@ def test_print_basic(monkeypatch):
 
     data = {'SenzaInfo': {'StackName': 'test'}, 'SenzaComponents': [{'Configuration': {'Type': 'Senza::Configuration',
                                                                                        'ServerSubnets': {
-                                                                                           'eu-west-1': [
+                                                                                           'myregion': [
                                                                                                'subnet-123']}}},
                                                                     {'AppServer': {
                                                                         'Type': 'Senza::TaupageAutoScalingGroup',
@@ -95,7 +96,7 @@ def test_print_replace_mustache(monkeypatch):
     monkeypatch.setattr('boto3.resource', my_resource)
     data = {'SenzaInfo': {'StackName': 'test',
                           'Parameters': [{'ApplicationId': {'Description': 'Application ID from kio'}}]},
-            'SenzaComponents': [{'Configuration': {'ServerSubnets': {'eu-west-1': ['subnet-123']},
+            'SenzaComponents': [{'Configuration': {'ServerSubnets': {'myregion': ['subnet-123']},
                                                    'Type': 'Senza::Configuration'}},
                                 {'AppServer': {'Image': 'AppImage',
                                                'InstanceType': 't2.micro',
@@ -135,7 +136,7 @@ def test_print_account_info(monkeypatch):
     boto3.list_account_aliases.return_value = {'AccountAliases': ['org-dummy']}
 
     monkeypatch.setattr('boto3.client', MagicMock(return_value=boto3))
-    data = {'SenzaComponents': [{'Configuration': {'ServerSubnets': {'eu-west-1': ['subnet-123']},
+    data = {'SenzaComponents': [{'Configuration': {'ServerSubnets': {'myregion': ['subnet-123']},
                                                    'Type': 'Senza::Configuration'}},
                                 {'AppServer': {'Image': 'AppImage-{{AccountInfo.TeamID}}-{{AccountInfo.AccountID}}',
                                                'InstanceType': 't2.micro',
@@ -171,7 +172,7 @@ def test_print_account_info_and_arguments_in_name(monkeypatch):
     boto3.list_account_aliases.return_value = {'AccountAliases': ['org-dummy']}
 
     monkeypatch.setattr('boto3.client', MagicMock(return_value=boto3))
-    data = {'SenzaComponents': [{'Configuration': {'ServerSubnets': {'eu-west-1': ['subnet-123']},
+    data = {'SenzaComponents': [{'Configuration': {'ServerSubnets': {'myregion': ['subnet-123']},
                                                    'Type': 'Senza::Configuration'}},
                                 {'AppServer': {'Image': 'AppImage-{{AccountInfo.TeamID}}-{{AccountInfo.AccountID}}',
                                                'InstanceType': 't2.micro',
@@ -193,31 +194,47 @@ def test_print_account_info_and_arguments_in_name(monkeypatch):
 
 
 def test_print_auto(monkeypatch):
-    images = [MagicMock(name='Taupage-AMI-123', id='ami-123')]
+    def my_resource(rtype, *args):
+        if rtype == 'ec2':
+            ec2 = MagicMock()
+            ec2.security_groups.filter.return_value = [MagicMock(name='app-sg', id='sg-007')]
+            ec2.images.filter.return_value = [MagicMock(name='Taupage-AMI-123', id='ami-123')]
+            ec2.subnets.all.return_value = [MagicMock(tags=[{'Key': 'Name', 'Value': 'internal-myregion-1a'}],
+                                                      id='subnet-abc123',
+                                                      availability_zone='myregion-1a'),
+                                            MagicMock(tags=[{'Key': 'Name', 'Value': 'internal-myregion-1b'}],
+                                                      id='subnet-def456',
+                                                      availability_zone='myregion-1b'),
+                                            MagicMock(tags=[{'Key': 'Name', 'Value': 'dmz-myregion-1a'}],
+                                                      id='subnet-ghi789',
+                                                      availability_zone='myregion-1a')
+                                            ]
+            return ec2
+        elif rtype == 'iam':
+            iam = MagicMock()
+            iam.server_certificates.all.return_value = [MagicMock(name='zo-ne',
+                                                                  server_certificate_metadata={'Arn': 'arn:aws:123'})]
+            return iam
+        elif rtype == 'sns':
+            sns = MagicMock()
+            topic = MagicMock(arn='arn:123:mytopic')
+            sns.topics.all.return_value = [topic]
+            return sns
+        return MagicMock()
 
-    zone = MagicMock()
-    zone.name = 'zo.ne'
-    cert = {'server_certificate_name': 'zo-ne', 'arn': 'arn:aws:123'}
-    cert_response = {
-        'list_server_certificates_response': {'list_server_certificates_result': {'server_certificate_metadata_list': [
-            cert
-        ]}}}
+    def my_client(rtype, *args):
+        if rtype == 'route53':
+            route53 = MagicMock()
+            route53.list_hosted_zones.return_value = {'HostedZones': [{'Id': '/hostedzone/123456',
+                                                                       'Name': 'zo.ne.',
+                                                                       'ResourceRecordSetCount': 23}],
+                                                      'IsTruncated': False,
+                                                      'MaxItems': '100'}
+            return route53
+        return MagicMock()
 
-    sg = MagicMock()
-    sg.name = 'app-sg'
-    sg.id = 'sg-007'
-
-    monkeypatch.setattr('boto.cloudformation.connect_to_region', lambda x: MagicMock())
-    monkeypatch.setattr('boto.vpc.connect_to_region', lambda x: MagicMock())
-    monkeypatch.setattr('boto.iam.connect_to_region', lambda x: MagicMock(list_server_certs=lambda: cert_response))
-    monkeypatch.setattr('boto.route53.connect_to_region', lambda x: MagicMock(get_zones=lambda: [zone]))
-    monkeypatch.setattr('boto.ec2.connect_to_region', lambda x: MagicMock(get_all_images=lambda filters: images,
-                                                                          get_all_security_groups=lambda: [sg]))
-
-    sns = MagicMock()
-    topic = {'TopicArn': 'arn:123:mytopic'}
-    sns.get_all_topics.return_value = {'ListTopicsResponse': {'ListTopicsResult': {'Topics': [topic]}}}
-    monkeypatch.setattr('boto.sns.connect_to_region', MagicMock(return_value=sns))
+    monkeypatch.setattr('boto3.client', my_client)
+    monkeypatch.setattr('boto3.resource', my_resource)
 
     data = {'SenzaInfo': {'StackName': 'test',
                           'OperatorTopicId': 'mytopic',
@@ -247,38 +264,47 @@ def test_print_auto(monkeypatch):
         result = runner.invoke(cli, ['print', 'myapp.yaml', '--region=myregion', '123', '1.0-SNAPSHOT'],
                                catch_exceptions=False)
 
-    assert 'AWSTemplateFormatVersion' in result.output
-    assert 'subnet-123' in result.output
-    assert 'source: foo/bar:1.0-SNAPSHOT' in result.output
-    assert '"HealthCheckType": "ELB"' in result.output
+    data = json.loads(result.output)
+    assert 'AWSTemplateFormatVersion' in data.keys()
+    assert 'subnet-abc123' in data['Mappings']['ServerSubnets']['myregion']['Subnets']
+    assert 'subnet-ghi789' not in data['Mappings']['ServerSubnets']['myregion']['Subnets']
+    assert 'subnet-ghi789' in data['Mappings']['LoadBalancerSubnets']['myregion']['Subnets']
+    assert 'source: foo/bar:1.0-SNAPSHO' in data['Resources']['AppServerConfig']['Properties']['UserData']['Fn::Base64']
+    assert 'ELB' == data['Resources']['AppServer']['Properties']['HealthCheckType']
 
 
 def test_print_default_value(monkeypatch):
-    images = [MagicMock(name='Taupage-AMI-123', id='ami-123')]
+    def my_resource(rtype, *args):
+        if rtype == 'ec2':
+            ec2 = MagicMock()
+            ec2.security_groups.filter.return_value = [MagicMock(name='app-sg', id='sg-007')]
+            ec2.images.filter.return_value = [MagicMock(name='Taupage-AMI-123', id='ami-123')]
+            return ec2
+        elif rtype == 'iam':
+            iam = MagicMock()
+            iam.server_certificates.all.return_value = [MagicMock(name='zo-ne',
+                                                                  server_certificate_metadata={'Arn': 'arn:aws:123'})]
+            return iam
+        elif rtype == 'sns':
+            sns = MagicMock()
+            topic = MagicMock(arn='arn:123:mytopic')
+            sns.topics.all.return_value = [topic]
+            return sns
+        return MagicMock()
 
-    zone = MagicMock()
-    zone.name = 'zo.ne'
-    cert = {'server_certificate_name': 'zo-ne', 'arn': 'arn:aws:123'}
-    cert_response = {
-        'list_server_certificates_response': {'list_server_certificates_result': {'server_certificate_metadata_list': [
-            cert
-        ]}}}
+    def my_client(rtype, *args):
+        if rtype == 'route53':
+            route53 = MagicMock()
+            route53.list_hosted_zones.return_value = {'HostedZones': [{'Id': '/hostedzone/123456',
+                                                                       'Name': 'zo.ne.',
+                                                                       'ResourceRecordSetCount': 23}],
+                                                      'IsTruncated': False,
+                                                      'MaxItems': '100'}
+            return route53
+        return MagicMock()
 
-    sg = MagicMock()
-    sg.name = 'app-sg'
-    sg.id = 'sg-007'
-
-    monkeypatch.setattr('boto.cloudformation.connect_to_region', lambda x: MagicMock())
-    monkeypatch.setattr('boto.vpc.connect_to_region', lambda x: MagicMock())
-    monkeypatch.setattr('boto.iam.connect_to_region', lambda x: MagicMock(list_server_certs=lambda: cert_response))
-    monkeypatch.setattr('boto.route53.connect_to_region', lambda x: MagicMock(get_zones=lambda: [zone]))
-    monkeypatch.setattr('boto.ec2.connect_to_region', lambda x: MagicMock(get_all_images=lambda filters: images,
-                                                                          get_all_security_groups=lambda: [sg]))
-
-    sns = MagicMock()
-    topic = {'TopicArn': 'arn:123:mytopic'}
-    sns.get_all_topics.return_value = {'ListTopicsResponse': {'ListTopicsResult': {'Topics': [topic]}}}
-    monkeypatch.setattr('boto.sns.connect_to_region', MagicMock(return_value=sns))
+    monkeypatch.setattr('boto3.client', my_client)
+    monkeypatch.setattr('boto3.resource', my_resource)
 
     data = {'SenzaInfo': {'StackName': 'test',
                           'OperatorTopicId': 'mytopic',
@@ -317,12 +343,10 @@ def test_print_default_value(monkeypatch):
 
 
 def test_dump(monkeypatch):
-    stack = MagicMock(stack_name='mystack-1')
     cf = MagicMock()
-    cf.list_stacks.return_value = [stack]
-    cf.get_template.return_value = {'GetTemplateResponse': {'GetTemplateResult': {'TemplateBody': '{"foo": "bar"}'}}}
-    monkeypatch.setattr('boto.cloudformation.connect_to_region', lambda x: cf)
-    monkeypatch.setattr('boto.iam.connect_to_region', lambda x: MagicMock())
+    cf.list_stacks.return_value = {'StackSummaries': [{'StackName': 'mystack-1'}]}
+    cf.get_template.return_value = {'TemplateBody': {'foo': 'bar'}}
+    monkeypatch.setattr('boto3.client', lambda *args: cf)
 
     runner = CliRunner()
 
@@ -330,7 +354,7 @@ def test_dump(monkeypatch):
         result = runner.invoke(cli, ['dump', 'mystack', '--region=myregion'],
                                catch_exceptions=False)
 
-        assert '{"foo": "bar"}' == result.output.rstrip()
+        assert '{\n    "foo": "bar"\n}' == result.output.rstrip()
 
         result = runner.invoke(cli, ['dump', 'mystack', '--region=myregion', '-o', 'yaml'],
                                catch_exceptions=False)
@@ -339,11 +363,18 @@ def test_dump(monkeypatch):
 
 
 def test_init(monkeypatch):
-    monkeypatch.setattr('boto.ec2.connect_to_region', lambda x: MagicMock())
-    monkeypatch.setattr('boto.cloudformation.connect_to_region', lambda x: MagicMock())
-    monkeypatch.setattr('boto.vpc.connect_to_region', lambda x: MagicMock())
-    monkeypatch.setattr('boto.iam.connect_to_region', lambda x: MagicMock())
-    monkeypatch.setattr('boto.iam.connect_to_region', lambda x: MagicMock())
+    def my_resource(rtype, *args):
+        if rtype == 'ec2':
+            ec2 = MagicMock()
+            ec2.security_groups.filter.side_effect = botocore.exceptions.ClientError(
+                {'Error': {'Code': 'InvalidGroup.NotFound',
+                           'Message': 'Group Not found'}},
+                'foobar')
+            return ec2
+        return MagicMock()
+
+    monkeypatch.setattr('boto3.client', lambda *args: MagicMock())
+    monkeypatch.setattr('boto3.resource', my_resource)
 
     runner = CliRunner()
 
@@ -362,11 +393,18 @@ def test_init(monkeypatch):
 
 
 def test_init_opt5(monkeypatch):
-    monkeypatch.setattr('boto.ec2.connect_to_region', lambda x: MagicMock())
-    monkeypatch.setattr('boto.cloudformation.connect_to_region', lambda x: MagicMock())
-    monkeypatch.setattr('boto.vpc.connect_to_region', lambda x: MagicMock())
-    monkeypatch.setattr('boto.iam.connect_to_region', lambda x: MagicMock())
-    monkeypatch.setattr('boto.iam.connect_to_region', lambda x: MagicMock())
+    def my_resource(rtype, *args):
+        if rtype == 'ec2':
+            ec2 = MagicMock()
+            ec2.security_groups.filter.side_effect = botocore.exceptions.ClientError(
+                {'Error': {'Code': 'InvalidGroup.NotFound',
+                           'Message': 'Group Not found'}},
+                'foobar')
+            return ec2
+        return MagicMock()
+
+    monkeypatch.setattr('boto3.client', lambda *args: MagicMock())
+    monkeypatch.setattr('boto3.resource', my_resource)
 
     runner = CliRunner()
 
