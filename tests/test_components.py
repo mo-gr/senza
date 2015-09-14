@@ -81,7 +81,6 @@ def test_component_load_balancer_healthcheck(monkeypatch):
         assert False, "check for supported protocols failed"
 
 
-
 def test_component_load_balancer_idletimeout(monkeypatch):
     configuration = {
         "Name": "test_lb",
@@ -161,6 +160,7 @@ def test_component_stups_auto_configuration(monkeypatch):
 
     assert {'myregion': {'Subnets': ['sn-1']}} == result['Mappings']['LoadBalancerSubnets']
     assert {'myregion': {'Subnets': ['sn-3']}} == result['Mappings']['ServerSubnets']
+
 
 def test_component_redis_node(monkeypatch):
     mock_string = "foo"

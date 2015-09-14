@@ -560,6 +560,8 @@ def print_cfjson(definition, region, version, parameter, output, force):
     region = get_region(region)
     check_credentials(region)
     account_info = AccountArguments(region=region)
+    pprint(account_info)
+    pprint(account_info.Region)
     args = parse_args(input, region, version, parameter, account_info)
     data = evaluate(input.copy(), args, account_info, force)
     cfjson = json.dumps(data, sort_keys=True, indent=4)
@@ -588,9 +590,9 @@ def delete(stack_ref, region, dry_run, force):
                     'Please use the "--force" flag if you really want to delete multiple stacks.')
 
     for stack in stacks:
-        with Action('Deleting Cloud Formation stack {}..'.format(stack.stack_name)):
+        with Action('Deleting Cloud Formation stack {}..'.format(stack.StackName)):
             if not dry_run:
-                cf.delete_stack(StackName=stack.stack_name)
+                cf.delete_stack(StackName=stack.StackName)
 
 
 def format_resource_type(resource_type):

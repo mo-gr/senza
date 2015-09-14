@@ -30,7 +30,7 @@ def test_version():
 
 
 def test_missing_credentials(capsys):
-    func = MagicMock(side_effect=boto.exception.NoAuthHandlerFound())
+    func = MagicMock(side_effect=botocore.exceptions.NoCredentialsError())
 
     try:
         handle_exceptions(func)()
@@ -42,8 +42,9 @@ def test_missing_credentials(capsys):
 
 
 def test_expired_credentials(capsys):
-    func = MagicMock(side_effect=boto.exception.BotoServerError(403, 'X',
-                     {'message': '**Security Token included in the Request is expired**'}))
+    func = MagicMock(side_effect=botocore.exceptions.ClientError({'Error': {'Code': 'ExpiredToken',
+                                                                            'Message': 'Token expired'}},
+                                                                 'foobar'))
 
     try:
         handle_exceptions(func)()
@@ -56,8 +57,7 @@ def test_expired_credentials(capsys):
 
 
 def test_print_basic(monkeypatch):
-    monkeypatch.setattr('boto.cloudformation.connect_to_region', lambda x: MagicMock())
-    monkeypatch.setattr('boto.iam.connect_to_region', lambda x: MagicMock())
+    monkeypatch.setattr('boto3.client', lambda *args: MagicMock())
 
     data = {'SenzaInfo': {'StackName': 'test'}, 'SenzaComponents': [{'Configuration': {'Type': 'Senza::Configuration',
                                                                                        'ServerSubnets': {
@@ -84,13 +84,15 @@ def test_print_basic(monkeypatch):
 
 
 def test_print_replace_mustache(monkeypatch):
-    sg = MagicMock()
-    sg.name = 'app-master-mind'
-    sg.id = 'sg-007'
+    def my_resource(rtype, *args):
+        if rtype == 'ec2':
+            ec2 = MagicMock()
+            ec2.security_groups.filter.return_value = [MagicMock(name='app-master-mind', id='sg-007')]
+            return ec2
+        return MagicMock()
 
-    monkeypatch.setattr('boto.cloudformation.connect_to_region', lambda x: MagicMock())
-    monkeypatch.setattr('boto.ec2.connect_to_region', lambda x: MagicMock(get_all_security_groups=lambda: [sg]))
-    monkeypatch.setattr('boto.iam.connect_to_region', lambda x: MagicMock())
+    monkeypatch.setattr('boto3.client', MagicMock())
+    monkeypatch.setattr('boto3.resource', my_resource)
     data = {'SenzaInfo': {'StackName': 'test',
                           'Parameters': [{'ApplicationId': {'Description': 'Application ID from kio'}}]},
             'SenzaComponents': [{'Configuration': {'ServerSubnets': {'eu-west-1': ['subnet-123']},
@@ -119,18 +121,20 @@ def test_print_replace_mustache(monkeypatch):
 
 
 def test_print_account_info(monkeypatch):
-    sg = MagicMock()
-    sg.name = 'app-master-mind'
-    sg.id = 'sg-007'
+    def my_resource(rtype, *args):
+        if rtype == 'ec2':
+            ec2 = MagicMock()
+            ec2.security_groups.filter.return_value = [MagicMock(name='app-master-mind', id='sg-007')]
+            return ec2
+        return MagicMock()
+
+    monkeypatch.setattr('boto3.resource', my_resource)
 
     boto3 = MagicMock()
     boto3.get_user.return_value = {'User': {'Arn': 'arn:aws:iam::0123456789:user/admin'}}
     boto3.list_account_aliases.return_value = {'AccountAliases': ['org-dummy']}
 
     monkeypatch.setattr('boto3.client', MagicMock(return_value=boto3))
-    monkeypatch.setattr('boto.cloudformation.connect_to_region', lambda x: MagicMock())
-    monkeypatch.setattr('boto.ec2.connect_to_region', lambda x: MagicMock(get_all_security_groups=lambda: [sg]))
-    monkeypatch.setattr('boto.iam.connect_to_region', lambda x: MagicMock())
     data = {'SenzaComponents': [{'Configuration': {'ServerSubnets': {'eu-west-1': ['subnet-123']},
                                                    'Type': 'Senza::Configuration'}},
                                 {'AppServer': {'Image': 'AppImage-{{AccountInfo.TeamID}}-{{AccountInfo.AccountID}}',
@@ -138,7 +142,7 @@ def test_print_account_info(monkeypatch):
                                                'TaupageConfig': {'runtime': 'Docker',
                                                                  'source': 'foo/bar'},
                                                'Type': 'Senza::TaupageAutoScalingGroup'}}],
-            'SenzaInfo': {'StackName': 'test-{{AccountInfo.Region}}'}}
+            'SenzaInfo': {'StackName': 'test-'}}
 
     runner = CliRunner()
 
