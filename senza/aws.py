@@ -80,18 +80,18 @@ def get_required_capabilities(data: dict):
     return capabilities
 
 
-def resolve_topic_arn(region, topic):
+def resolve_topic_arn(region, topic_name):
     '''
     >>> resolve_topic_arn(None, 'arn:123')
     'arn:123'
     '''
-    if topic.startswith('arn:'):
-        topic_arn = topic
+    if topic_name.startswith('arn:'):
+        topic_arn = topic_name
     else:
         # resolve topic name to ARN
         sns = boto3.resource('sns', region)
         for topic in sns.topics.all():
-            if topic.arn.endswith(topic):
+            if topic.arn.endswith(topic_name):
                 topic_arn = topic.arn
 
     return topic_arn
