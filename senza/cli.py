@@ -31,7 +31,6 @@ from urllib.request import urlopen
 from urllib.parse import quote
 from .traffic import change_version_traffic, print_version_traffic, get_records
 from .utils import named_value, camel_case_to_underscore, pystache_render
-from pprint import pprint
 
 CONTEXT_SETTINGS = dict(help_option_names=['-h', '--help'])
 
